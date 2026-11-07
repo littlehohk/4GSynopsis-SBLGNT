@@ -100,6 +100,22 @@ table.toc{border-collapse:collapse;width:100%;min-width:640px;font-size:.95rem}
 .navrow a:hover{text-decoration:underline}
 .src{color:var(--muted);font-size:.8rem;margin-top:2rem;font-family:var(--ui);max-width:80ch}
 
+
+/* aligned synopsis */
+.aln{display:grid;grid-template-columns:repeat(var(--cols),minmax(14rem,1fr));min-width:calc(var(--cols) * 14rem)}
+.cell{padding:.06rem .9rem;border-left:1px solid var(--rule);line-height:1.5;text-align:left}
+.cell.c0{border-left:0;padding-left:0}
+.cell.cl{padding-right:0}
+.cell.s{font-size:.86em}
+.dim .cell.s{color:var(--muted)}
+.cell.hd{display:flex;justify-content:space-between;gap:.5rem;align-items:baseline;padding-top:.7rem;padding-bottom:.15rem;font-variant-numeric:tabular-nums}
+.cell.hd.r0{padding-top:0}
+.cell.hd .in{display:flex;justify-content:space-between;gap:.5rem;width:100%;border-bottom:1px solid var(--rule);padding-bottom:.15rem}
+.cell.hd.p .ref{font-weight:700}
+.cell.hd a.x,.cell.hd span.x{font-size:.85rem;text-decoration:none;white-space:nowrap}
+.cell.ch{font-size:.82rem;color:var(--muted);font-style:italic;padding-bottom:.2rem}
+.cell.hl{background:var(--soft)}
+
 /* dialogs */
 dialog{border:1px solid var(--rule);border-radius:6px;background:var(--paper);color:var(--ink);max-width:min(46rem,94vw);padding:1.2rem 1.4rem;font-family:var(--ui);font-size:14px}
 dialog::backdrop{background:rgba(0,0,0,.35)}
@@ -120,7 +136,8 @@ dialog button.primary{background:var(--ink);color:var(--paper);border-color:var(
   body.printing #app{display:none}
   body.printing #printArea{display:block}
   .psec{break-after:page}
-  .syn{min-width:0;grid-template-columns:repeat(var(--cols),1fr)}
+  .syn,.aln{min-width:0;grid-template-columns:repeat(var(--cols),1fr)}
+  .cell.hl{background:none}
   .syn-scroll{overflow:visible}
   a{color:inherit;text-decoration:none}
 }
@@ -146,6 +163,7 @@ dialog button.primary{background:var(--ink);color:var(--paper);border-color:var(
     <button id="bImport">Import text…</button>
   </div>
   <div class="grp">
+    <select id="layoutSel" aria-label="Layout"><option value="aligned">Aligned</option><option value="flow">Running text</option></select>
     <select id="sepSel" aria-label="Reference style"><option value=":">Mt 9:9</option><option value=",">Mt 9,9</option></select>
     <select id="sizeSel" aria-label="Text size"><option value="15px">Small</option><option value="17px">Medium</option><option value="19px">Large</option></select>
     <button id="bPrint">Print…</button>
@@ -195,7 +213,7 @@ const NAMES={Mt:'Matthew',Mk:'Mark',Lk:'Luke',Jn:'John','1Cor':'1 Corinthians'};
 const app=document.getElementById('app');
 const store={get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(e){return d}},
              set(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}}};
-let S=Object.assign({src:'sbl',sep:':',size:'17px',dim:true},store.get('syn-settings',{}));
+let S=Object.assign({src:'sbl',sep:':',size:'17px',dim:true,layout:'aligned'},store.get('syn-settings',{}));
 let OWN=store.get('syn-own-text',null);
 const secByN={};D.secs.forEach(s=>secByN[s.n]=s);
 const divOf=n=>{let d=null;for(const x of D.divs){if(x.first<=n)d=x}return d};
@@ -204,7 +222,7 @@ function applySettings(){
   document.documentElement.style.setProperty('--fs',S.size);
   document.body.classList.toggle('dim',S.dim);
   srcSel.value=(S.src==='own'&&OWN)?'own':'sbl';
-  sepSel.value=S.sep; sizeSel.value=S.size;
+  sepSel.value=S.sep; sizeSel.value=S.size; layoutSel.value=S.layout;
 }
 function save(){store.set('syn-settings',S)}
 
@@ -241,6 +259,98 @@ function refList(refs,book){
   return refs.map(r=>'<span class="'+(r.b?'p':'')+'">'+(book?book+' ':'')+fmtRef(r.r)+'</span>').join('; ');
 }
 
+
+/* ---------- phrase alignment ---------- */
+function norm(w){return w.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/ς/g,'σ').replace(/[^α-ω]/g,'')}
+const STOP=new Set(('και δε ο η το του της τω τη τον την οι αι τα των τοις ταις τους τας εν εις γαρ οτι ινα μη ου ουκ ουχ '+
+ 'αυτος αυτου αυτω αυτον αυτοι αυτων αυτοις αυτους αυτη αυτης αυτην αυτα επι προς απο εκ εξ δια μετα κατα περι υπο παρα '+
+ 'ως αν εαν ει τις τι ος ον ων ους ην ης υμιν υμας υμων υμεις ημιν ημας ημων μου σου μοι σοι με σε ουν αλλα τε').split(' ').map(norm));
+function stems(words){
+  const s=new Set();
+  words.forEach(w=>{const n=norm(w); if(n.length<2||STOP.has(n)) return;
+    s.add(n.length>4?n.slice(0,4):n);
+    if(n[0]==='ε'&&n.length>5) s.add(n.slice(1,5));
+  });
+  return s;
+}
+function sim(a,b){ if(!a.size||!b.size) return 0; let k=0; for(const x of a) if(b.has(x)) k++; return 2*k/(a.size+b.size) }
+const SPLIT_AFTER=/[,.·;;:]$/;
+function blockSegs(book,ref){
+  const segs=[{hd:true,ref}];
+  let cur=null,prevCh=null;
+  const start=()=>{cur={html:[],words:[],p:ref.b}};
+  const flush=()=>{ if(cur&&cur.html.length){cur.st=stems(cur.words);segs.push(cur)} cur=null };
+  ref.v.forEach(([cv,part],i)=>{
+    const [c,v]=cv.split(':');
+    flush(); start();
+    if(c!==prevCh&&(i===0||v==='1')) cur.html.push('<span class="cn">'+c+'</span>');
+    prevCh=c;
+    if(v!=='SE') cur.html.push('<span class="vn">'+v+part+'</span>');
+    const vt=verseText(book,cv);
+    if(!vt){cur.html.push('<span class="om" title="Not in the text of this edition">—</span>');flush();return}
+    const ws=vt.t.split(' ');
+    ws.forEach((w,k)=>{
+      if(!cur) start();
+      const nx=ws[k+1];
+      cur.html.push(esc(w)+(k===ws.length-1&&vt.fb?'<span class="fb" title="Not in your imported text; shown from SBLGNT">†</span>':''));
+      cur.words.push(w);
+      if(SPLIT_AFTER.test(w)||(nx&&norm(nx)==='και'&&cur.words.length>=6)) flush();
+    });
+  });
+  flush();
+  segs.forEach(s=>{ if(s.html) s.html=s.html.join(' ').replace(/(<span class="vn">[^<]*<\/span>) /g,'$1') });
+  return segs;
+}
+function alignColumns(cols,pivot){
+  const k=cols.length;
+  let rows=cols[pivot].map(s=>{const r=new Array(k).fill(null);r[pivot]=s;return r});
+  const GAP=-0.25;
+  for(let c=0;c<k;c++){ if(c===pivot) continue;
+    const segs=cols[c],n=rows.length,m=segs.length;
+    const W=m+1,H=new Float64Array((n+1)*W),T=new Int8Array((n+1)*W);
+    for(let i=1;i<=n;i++){H[i*W]=i*GAP;T[i*W]=1}
+    for(let j=1;j<=m;j++){H[j]=j*GAP;T[j]=2}
+    for(let i=1;i<=n;i++){
+      const row=rows[i-1],rowHd=row.some(x=>x&&x.hd);
+      for(let j=1;j<=m;j++){
+        const sg=segs[j-1]; let ms;
+        if(sg.hd||rowHd) ms=(sg.hd&&rowHd)?0.6:-9;
+        else{let best=0;for(const x of row) if(x){const q=sim(x.st,sg.st); if(q>best)best=q} ms=3*best-0.2}
+        const a=H[(i-1)*W+j-1]+ms,b=H[(i-1)*W+j]+GAP,d=H[i*W+j-1]+GAP;
+        if(a>=b&&a>=d){H[i*W+j]=a;T[i*W+j]=0}else if(b>=d){H[i*W+j]=b;T[i*W+j]=1}else{H[i*W+j]=d;T[i*W+j]=2}
+      }
+    }
+    const out=[];let i=n,j=m;
+    while(i>0||j>0){
+      const tr=(i>0&&j>0)?T[i*W+j]:(i>0?1:2);
+      if(tr===0){const r=rows[i-1].slice();r[c]=segs[j-1];out.push(r);i--;j--}
+      else if(tr===1){out.push(rows[i-1].slice());i--}
+      else{const r=new Array(k).fill(null);r[c]=segs[j-1];out.push(r);j--}
+    }
+    rows=out.reverse();
+  }
+  return rows;
+}
+function alignedHTML(s,cols,forPrint){
+  const segCols=cols.map(c=>{let all=[];c.refs.forEach(r=>{all=all.concat(blockSegs(c.b,r))});return all});
+  let pivot=cols.findIndex(c=>c.refs.some(r=>r.b)); if(pivot<0) pivot=0;
+  const rows=alignColumns(segCols,pivot),k=cols.length;
+  const cls=(ci,ri)=>'cell c'+ci+(ci===k-1?' cl':'')+' r'+ri;
+  let h='<div class="syn-scroll"><div class="aln" style="--cols:'+k+'" lang="grc">';
+  cols.forEach((c,ci)=>{h+='<div class="'+cls(ci,'h')+' ch" lang="en">'+NAMES[c.b]+'</div>'});
+  rows.forEach((row,ri)=>{
+    row.forEach((x,ci)=>{
+      if(!x){h+='<div class="'+cls(ci,ri)+'" data-r="'+ri+'"></div>';return}
+      if(x.hd){const r=x.ref;
+        const xr=r.x&&r.x!==s.n?(forPrint?'<span class="x">→ § '+r.x+'</span>':'<a class="x" href="#s'+r.x+'" title="Printed in sequence in § '+r.x+'">→ § '+r.x+'</a>'):'';
+        h+='<div class="'+cls(ci,ri)+' hd '+(r.b?'p':'s')+(ri===0?' r0':'')+'" lang="en" data-r="'+ri+'"><span class="in"><span class="ref">'+cols[ci].b+' '+fmtRef(r.r)+'</span>'+xr+'</span></div>';
+        return}
+      h+='<div class="'+cls(ci,ri)+' '+(x.p?'p':'s')+'" data-r="'+ri+'">'+x.html+'</div>';
+    });
+  });
+  return h+'</div></div>';
+}
+
 function sectionHTML(s,forPrint){
   const cols=[];
   BOOKS.forEach((b,i)=>{ if(s.c[i].length) cols.push({b,refs:s.c[i]}) });
@@ -250,6 +360,7 @@ function sectionHTML(s,forPrint){
   let h='<div class="sec-head"><div class="sec-num"><small>§</small>'+s.n+'</div>'+
         '<div class="sec-div">'+esc(d.title)+'</div><h1 class="sec-title">'+esc(s.t)+'</h1>'+
         '<div class="sec-refs">'+headRefs+'</div></div>';
+  if(S.layout==='aligned') return h+alignedHTML(s,cols,forPrint);
   h+='<div class="syn-scroll"><div class="syn" style="--cols:'+cols.length+'">';
   cols.forEach(c=>{
     h+='<div class="col" lang="grc"><div class="colhead" lang="en">'+NAMES[c.b]+'</div>';
@@ -271,7 +382,7 @@ function showSection(n){
   const p=secByN[n-1],q=secByN[n+1];
   h+='<nav class="navrow">'+(p?'<a href="#s'+p.n+'">‹ § '+p.n+' '+esc(p.t)+'</a>':'<span></span>')+
      '<a href="#contents">Contents</a>'+(q?'<a href="#s'+q.n+'">§ '+q.n+' '+esc(q.t)+' ›</a>':'<span></span>')+'</nav>';
-  h+='<p class="src">Bold reference: the passage stands here in its own Gospel’s sequence. Plain reference with “→ §”: a parallel repeated from elsewhere, printed in sequence in that section. Text: '+
+  h+='<p class="src">'+(S.layout==='aligned'?'Lines are aligned automatically by shared vocabulary; blank space marks wording absent from that Gospel. ':'')+'Bold reference: the passage stands here in its own Gospel’s sequence. Plain reference with “→ §”: a parallel repeated from elsewhere, printed in sequence in that section. Text: '+
      (S.src==='own'&&OWN?'your imported text (gaps from SBLGNT, marked †).':'SBL Greek New Testament, © 2010 Society of Biblical Literature and Logos Bible Software, CC BY 4.0.')+'</p>';
   app.innerHTML=h;
   document.title='§ '+n+' '+s.t+' — Synopsis';
@@ -318,6 +429,10 @@ function showContents(filter){
 }
 function toRoman(n){const m=[[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];let r='';for(const[v,s]of m)while(n>=v){r+=s;n-=v}return r}
 
+app.addEventListener('mouseover',e=>{const c=e.target.closest('.cell[data-r]');
+  app.querySelectorAll('.cell.hl').forEach(x=>x.classList.remove('hl'));
+  if(c) app.querySelectorAll('.cell[data-r="'+c.dataset.r+'"]').forEach(x=>x.classList.add('hl'))});
+app.addEventListener('mouseleave',()=>app.querySelectorAll('.cell.hl').forEach(x=>x.classList.remove('hl')));
 app.addEventListener('click',e=>{const tr=e.target.closest('tr[data-n]'); if(tr) location.hash='s'+tr.dataset.n});
 app.addEventListener('keydown',e=>{const tr=e.target.closest('tr[data-n]'); if(tr&&e.key==='Enter') location.hash='s'+tr.dataset.n});
 
@@ -336,6 +451,7 @@ document.addEventListener('keydown',e=>{
 });
 srcSel.onchange=()=>{ if(srcSel.value==='own'&&!OWN){srcSel.value='sbl';openImport();return} S.src=srcSel.value;save();route()};
 sepSel.onchange=()=>{S.sep=sepSel.value;save();route()};
+layoutSel.onchange=()=>{S.layout=layoutSel.value;save();route()};
 sizeSel.onchange=()=>{S.size=sizeSel.value;save();applySettings()};
 
 /* import */
